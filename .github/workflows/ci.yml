@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: '-Dwarnings'
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    name: Formatting
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --check
+
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    name: Clippy & Test (${{ matrix.os }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: rustup component add clippy
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --verbose
