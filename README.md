@@ -11,6 +11,9 @@ ghcc is a CLI tool for generating conventional commit messages with GitHub Copil
 - **Uses GitHub Copilot** - Just log in with your existing account. No API keys needed.
 - **Model selection** - Choose from your enabled Copilot models (default: `gpt-5-mini`)
 
+> [!TIP]
+> Out of the free models `gpt-5-mini` (default) seems to provide the best overall quality for me but is a bit slow. If you prefer a snappier experience with almost as good messages you can try `gpt-4.1`
+
 ## Quickstart
 
 1. **Install ghcc:**
