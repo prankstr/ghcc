@@ -141,6 +141,8 @@ pub fn has_staged_changes() -> Result<bool, GitError> {
 }
 
 /// Read diff content from a file or stdin (if path is "-")
+/// Only available in debug builds for testing purposes.
+#[cfg(debug_assertions)]
 pub fn read_diff_from_file(path: &str) -> Result<String, GitError> {
     use std::io::Read;
 
@@ -157,6 +159,8 @@ pub fn read_diff_from_file(path: &str) -> Result<String, GitError> {
 }
 
 /// Derive a diff stat summary from diff content (similar to git diff --stat)
+/// Only available in debug builds for testing purposes.
+#[cfg(debug_assertions)]
 pub fn derive_diff_stat(diff: &str) -> String {
     let mut files: Vec<(String, usize, usize)> = Vec::new();
     let mut current_file: Option<String> = None;
@@ -449,6 +453,7 @@ mod tests {
         assert!(!is_initial_commit_in_dir(dir.path()).unwrap());
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn test_derive_diff_stat_single_file() {
         let diff = r#"diff --git a/README.md b/README.md
@@ -470,6 +475,7 @@ index 1234567..abcdefg 100644
         assert!(stat.contains("1 deletion"));
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn test_derive_diff_stat_multiple_files() {
         let diff = r#"diff --git a/src/main.rs b/src/main.rs
@@ -499,6 +505,7 @@ index 1234567..abcdefg 100644
         assert!(stat.contains("2 files changed"));
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn test_derive_diff_stat_empty_diff() {
         let stat = derive_diff_stat("");

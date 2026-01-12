@@ -24,8 +24,11 @@ fn print_usage() {
     eprintln!("Options:");
     eprintln!("  -d, --detailed      Include bullet-point body (default: single-line)");
     eprintln!("  -a, --auto          Let AI decide format (experimental)");
-    eprintln!("  --diff-file <path>  Read diff from file instead of git (use - for stdin)");
-    eprintln!("  --model <name>      Use specific model for this request");
+    #[cfg(debug_assertions)]
+    {
+        eprintln!("  --diff-file <path>  Read diff from file instead of git (use - for stdin)");
+        eprintln!("  --model <name>      Use specific model for this request");
+    }
     eprintln!("  -h, --help          Show this help message");
     eprintln!("  -V, --version       Show version");
 }
@@ -283,6 +286,7 @@ fn cmd_hook(msg_file: &str, style: copilot::CommitStyle) -> Result<(), Box<dyn s
     Ok(())
 }
 
+#[cfg(debug_assertions)]
 fn cmd_generate(
     style: copilot::CommitStyle,
     diff_file: Option<&str>,
@@ -328,6 +332,31 @@ fn cmd_generate(
     Ok(())
 }
 
+#[cfg(not(debug_assertions))]
+fn cmd_generate(style: copilot::CommitStyle) -> Result<(), Box<dyn std::error::Error>> {
+    let auth = auth::get_valid_auth()?;
+
+    if !git::has_staged_changes()? {
+        eprintln!("No staged changes found. Please stage your changes using 'git add'.");
+        return Ok(());
+    }
+
+    // Short-circuit for initial commit
+    if git::is_initial_commit()? {
+        println!("Initial commit");
+        return Ok(());
+    }
+
+    let diff = git::get_diff()?;
+    let diff_stat = git::get_diff_stat()?;
+    let message = copilot::generate_commit_message(&auth, &diff, &diff_stat, style)?;
+
+    // Output to stdout for piping: `git commit -m "$(ghcc)"`
+    println!("{}", message);
+
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
 
@@ -340,7 +369,8 @@ fn main() -> ExitCode {
         copilot::CommitStyle::SingleLine
     };
 
-    // Check for --diff-file <path>
+    // Debug-only: Check for --diff-file <path>
+    #[cfg(debug_assertions)]
     let diff_file: Option<String> = if let Some(pos) = args.iter().position(|a| a == "--diff-file")
     {
         match args.get(pos + 1) {
@@ -354,7 +384,8 @@ fn main() -> ExitCode {
         None
     };
 
-    // Check for --model <name>
+    // Debug-only: Check for --model <name>
+    #[cfg(debug_assertions)]
     let model_override: Option<String> = if let Some(pos) = args.iter().position(|a| a == "--model")
     {
         match args.get(pos + 1) {
@@ -370,14 +401,17 @@ fn main() -> ExitCode {
 
     // Check for --hook <msg-file> (internal, called by git hook)
     if let Some(pos) = args.iter().position(|a| a == "--hook") {
-        // --diff-file and --model are incompatible with --hook
-        if diff_file.is_some() {
-            eprintln!("Error: --diff-file cannot be used with --hook");
-            return ExitCode::from(1);
-        }
-        if model_override.is_some() {
-            eprintln!("Error: --model cannot be used with --hook");
-            return ExitCode::from(1);
+        // Debug-only: --diff-file and --model are incompatible with --hook
+        #[cfg(debug_assertions)]
+        {
+            if diff_file.is_some() {
+                eprintln!("Error: --diff-file cannot be used with --hook");
+                return ExitCode::from(1);
+            }
+            if model_override.is_some() {
+                eprintln!("Error: --model cannot be used with --hook");
+                return ExitCode::from(1);
+            }
         }
 
         if let Some(msg_file) = args.get(pos + 1) {
@@ -395,7 +429,7 @@ fn main() -> ExitCode {
     }
 
     // Get command (first non-flag argument after program name)
-    // Skip --diff-file and --model arguments when looking for commands
+    #[cfg(debug_assertions)]
     let cmd = args.iter().skip(1).find(|a| {
         if a.starts_with('-') {
             return false;
@@ -414,6 +448,9 @@ fn main() -> ExitCode {
         }
         true
     });
+
+    #[cfg(not(debug_assertions))]
+    let cmd = args.iter().skip(1).find(|a| !a.starts_with('-'));
 
     let result = match cmd.map(|s| s.as_str()) {
         Some("login") => cmd_login(),
@@ -448,7 +485,10 @@ fn main() -> ExitCode {
             print_usage();
             return ExitCode::from(1);
         }
+        #[cfg(debug_assertions)]
         None => cmd_generate(style, diff_file.as_deref(), model_override.as_deref()),
+        #[cfg(not(debug_assertions))]
+        None => cmd_generate(style),
     };
 
     match result {
