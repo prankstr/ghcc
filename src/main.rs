@@ -24,6 +24,8 @@ fn print_usage() {
     eprintln!("Options:");
     eprintln!("  -d, --detailed      Include bullet-point body (default: single-line)");
     eprintln!("  -a, --auto          Let AI decide format (experimental)");
+    eprintln!("  --diff-file <path>  Read diff from file instead of git (use - for stdin)");
+    eprintln!("  --model <name>      Use specific model for this request");
     eprintln!("  -h, --help          Show this help message");
     eprintln!("  -V, --version       Show version");
 }
@@ -104,6 +106,8 @@ fn cmd_models() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     eprintln!();
+    eprintln!("Missing a model? Enable it at https://github.com/settings/copilot/features");
+    eprintln!();
 
     let current = auth.model.as_deref().unwrap_or(copilot::DEFAULT_MODEL);
     eprintln!("Current: {}", current);
@@ -128,6 +132,7 @@ fn cmd_models() -> Result<(), Box<dyn std::error::Error>> {
                 .as_ref()
                 .and_then(|c| c.limits.as_ref())
                 .and_then(|l| l.max_prompt_tokens);
+            auth.supported_endpoints = selected.supported_endpoints.clone();
             auth::save_auth(&auth)?;
             eprintln!("Model set to: {}", selected.id);
         } else {
@@ -278,22 +283,43 @@ fn cmd_hook(msg_file: &str, style: copilot::CommitStyle) -> Result<(), Box<dyn s
     Ok(())
 }
 
-fn cmd_generate(style: copilot::CommitStyle) -> Result<(), Box<dyn std::error::Error>> {
-    let auth = auth::get_valid_auth()?;
+fn cmd_generate(
+    style: copilot::CommitStyle,
+    diff_file: Option<&str>,
+    model_override: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut auth = auth::get_valid_auth()?;
 
-    if !git::has_staged_changes()? {
-        eprintln!("No staged changes found. Please stage your changes using 'git add'.");
-        return Ok(());
+    // Override model if specified (doesn't persist to disk)
+    if let Some(model) = model_override {
+        auth.model = Some(model.to_string());
+
+        // Infer supported_endpoints from model name
+        // Codex models only support /responses endpoint (not /chat/completions)
+        if model.contains("codex") {
+            auth.supported_endpoints = Some(vec!["/responses".to_string()]);
+        }
     }
 
-    // Short-circuit for initial commit
-    if git::is_initial_commit()? {
-        println!("Initial commit");
-        return Ok(());
-    }
+    let (diff, diff_stat) = if let Some(path) = diff_file {
+        let diff = git::read_diff_from_file(path)?;
+        let diff_stat = git::derive_diff_stat(&diff);
+        (diff, diff_stat)
+    } else {
+        if !git::has_staged_changes()? {
+            eprintln!("No staged changes found. Please stage your changes using 'git add'.");
+            return Ok(());
+        }
 
-    let diff = git::get_diff()?;
-    let diff_stat = git::get_diff_stat()?;
+        // Short-circuit for initial commit
+        if git::is_initial_commit()? {
+            println!("Initial commit");
+            return Ok(());
+        }
+
+        (git::get_diff()?, git::get_diff_stat()?)
+    };
+
     let message = copilot::generate_commit_message(&auth, &diff, &diff_stat, style)?;
 
     // Output to stdout for piping: `git commit -m "$(ghcc)"`
@@ -314,8 +340,46 @@ fn main() -> ExitCode {
         copilot::CommitStyle::SingleLine
     };
 
+    // Check for --diff-file <path>
+    let diff_file: Option<String> = if let Some(pos) = args.iter().position(|a| a == "--diff-file")
+    {
+        match args.get(pos + 1) {
+            Some(path) if !path.starts_with('-') || path == "-" => Some(path.clone()),
+            _ => {
+                eprintln!("Error: --diff-file requires a path argument (use - for stdin)");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        None
+    };
+
+    // Check for --model <name>
+    let model_override: Option<String> = if let Some(pos) = args.iter().position(|a| a == "--model")
+    {
+        match args.get(pos + 1) {
+            Some(name) if !name.starts_with('-') => Some(name.clone()),
+            _ => {
+                eprintln!("Error: --model requires a model name");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        None
+    };
+
     // Check for --hook <msg-file> (internal, called by git hook)
     if let Some(pos) = args.iter().position(|a| a == "--hook") {
+        // --diff-file and --model are incompatible with --hook
+        if diff_file.is_some() {
+            eprintln!("Error: --diff-file cannot be used with --hook");
+            return ExitCode::from(1);
+        }
+        if model_override.is_some() {
+            eprintln!("Error: --model cannot be used with --hook");
+            return ExitCode::from(1);
+        }
+
         if let Some(msg_file) = args.get(pos + 1) {
             return match cmd_hook(msg_file, style) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -331,7 +395,25 @@ fn main() -> ExitCode {
     }
 
     // Get command (first non-flag argument after program name)
-    let cmd = args.iter().skip(1).find(|a| !a.starts_with('-'));
+    // Skip --diff-file and --model arguments when looking for commands
+    let cmd = args.iter().skip(1).find(|a| {
+        if a.starts_with('-') {
+            return false;
+        }
+        // Check if this arg is the value for --diff-file
+        if let Some(pos) = args.iter().position(|x| x == "--diff-file") {
+            if args.get(pos + 1).map_or(false, |arg| arg == *a) {
+                return false;
+            }
+        }
+        // Check if this arg is the value for --model
+        if let Some(pos) = args.iter().position(|x| x == "--model") {
+            if args.get(pos + 1).map_or(false, |arg| arg == *a) {
+                return false;
+            }
+        }
+        true
+    });
 
     let result = match cmd.map(|s| s.as_str()) {
         Some("login") => cmd_login(),
@@ -366,7 +448,7 @@ fn main() -> ExitCode {
             print_usage();
             return ExitCode::from(1);
         }
-        None => cmd_generate(style),
+        None => cmd_generate(style, diff_file.as_deref(), model_override.as_deref()),
     };
 
     match result {

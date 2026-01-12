@@ -84,7 +84,7 @@ fn read_ignore_patterns() -> Vec<String> {
 pub fn get_diff() -> Result<String, GitError> {
     let ignore_patterns = read_ignore_patterns();
 
-    let mut args = vec!["diff", "--cached", "--"];
+    let mut args = vec!["diff", "--cached", "-U12", "--"];
 
     // Add pathspecs: start with "." to include all, then exclude patterns
     args.push(".");
@@ -138,6 +138,97 @@ pub fn get_diff_stat() -> Result<String, GitError> {
 pub fn has_staged_changes() -> Result<bool, GitError> {
     let diff = get_diff()?;
     Ok(!diff.is_empty())
+}
+
+/// Read diff content from a file or stdin (if path is "-")
+pub fn read_diff_from_file(path: &str) -> Result<String, GitError> {
+    use std::io::Read;
+
+    if path == "-" {
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| GitError::Git(format!("Failed to read stdin: {}", e)))?;
+        Ok(buf)
+    } else {
+        std::fs::read_to_string(path)
+            .map_err(|e| GitError::Git(format!("Failed to read {}: {}", path, e)))
+    }
+}
+
+/// Derive a diff stat summary from diff content (similar to git diff --stat)
+pub fn derive_diff_stat(diff: &str) -> String {
+    let mut files: Vec<(String, usize, usize)> = Vec::new();
+    let mut current_file: Option<String> = None;
+    let mut current_ins = 0usize;
+    let mut current_del = 0usize;
+
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            // Save previous file stats
+            if let Some(file) = current_file.take() {
+                files.push((file, current_ins, current_del));
+            }
+            // Extract filename from "diff --git a/path b/path"
+            if let Some(b_part) = line.split(" b/").nth(1) {
+                current_file = Some(b_part.to_string());
+                current_ins = 0;
+                current_del = 0;
+            }
+        } else if current_file.is_some() {
+            if line.starts_with('+') && !line.starts_with("+++") {
+                current_ins += 1;
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                current_del += 1;
+            }
+        }
+    }
+
+    // Don't forget the last file
+    if let Some(file) = current_file {
+        files.push((file, current_ins, current_del));
+    }
+
+    if files.is_empty() {
+        return String::new();
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut total_ins = 0usize;
+    let mut total_del = 0usize;
+
+    // Find max filename length for alignment
+    let max_name_len = files.iter().map(|(f, _, _)| f.len()).max().unwrap_or(0);
+
+    for (file, ins, del) in &files {
+        total_ins += ins;
+        total_del += del;
+        let total = ins + del;
+        // Truncate the +/- bar to reasonable length
+        let bar_len = std::cmp::min(total, 50);
+        let ins_bar = std::cmp::min(*ins, bar_len);
+        let del_bar = bar_len.saturating_sub(ins_bar).min(*del);
+        let bar = format!("{}{}", "+".repeat(ins_bar), "-".repeat(del_bar));
+        lines.push(format!(
+            " {:width$} | {:>4} {}",
+            file,
+            total,
+            bar,
+            width = max_name_len
+        ));
+    }
+
+    lines.push(format!(
+        " {} file{} changed, {} insertion{}(+), {} deletion{}(-)",
+        files.len(),
+        if files.len() == 1 { "" } else { "s" },
+        total_ins,
+        if total_ins == 1 { "" } else { "s" },
+        total_del,
+        if total_del == 1 { "" } else { "s" }
+    ));
+
+    lines.join("\n")
 }
 
 /// Check if this is the initial commit (no commits yet; HEAD does not exist)
@@ -356,5 +447,61 @@ mod tests {
 
         // Two commits - should NOT be treated as initial commit
         assert!(!is_initial_commit_in_dir(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn test_derive_diff_stat_single_file() {
+        let diff = r#"diff --git a/README.md b/README.md
+index 1234567..abcdefg 100644
+--- a/README.md
++++ b/README.md
+@@ -10,7 +10,7 @@ A CLI tool for generating commit messages.
+ ## Installation
+ 
+-cargo instal ghcc
++cargo install ghcc
+ 
+ ## Usage"#;
+
+        let stat = derive_diff_stat(diff);
+        assert!(stat.contains("README.md"));
+        assert!(stat.contains("1 file"));
+        assert!(stat.contains("1 insertion"));
+        assert!(stat.contains("1 deletion"));
+    }
+
+    #[test]
+    fn test_derive_diff_stat_multiple_files() {
+        let diff = r#"diff --git a/src/main.rs b/src/main.rs
+index 1234567..abcdefg 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,3 +1,5 @@
++use std::io;
++use std::fs;
+ fn main() {
+     println!("Hello");
+ }
+diff --git a/src/lib.rs b/src/lib.rs
+index 1234567..abcdefg 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,5 +1,4 @@
+-fn old_function() {
+-    // removed
+-}
++fn new_function() {}
+"#;
+
+        let stat = derive_diff_stat(diff);
+        assert!(stat.contains("src/main.rs"));
+        assert!(stat.contains("src/lib.rs"));
+        assert!(stat.contains("2 files changed"));
+    }
+
+    #[test]
+    fn test_derive_diff_stat_empty_diff() {
+        let stat = derive_diff_stat("");
+        assert!(stat.is_empty());
     }
 }
