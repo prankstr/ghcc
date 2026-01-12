@@ -52,6 +52,16 @@ struct StreamResponse {
     choices: Vec<StreamChoice>,
 }
 
+// Structs for /responses API
+#[derive(Debug, Serialize)]
+struct ResponsesRequest {
+    model: String,
+    input: String,
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ModelsResponse {
     pub data: Vec<Model>,
@@ -66,6 +76,10 @@ pub struct Model {
     pub model_picker_enabled: bool,
     #[serde(default)]
     pub capabilities: Option<ModelCapabilities>,
+    #[serde(default)]
+    pub policy: Option<ModelPolicy>,
+    #[serde(default)]
+    pub supported_endpoints: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -78,6 +92,12 @@ pub struct ModelCapabilities {
 pub struct ModelLimits {
     #[serde(default)]
     pub max_prompt_tokens: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ModelPolicy {
+    #[serde(default)]
+    pub state: Option<String>,
 }
 
 #[derive(Debug)]
@@ -108,6 +128,9 @@ impl From<auth::AuthError> for CopilotError {
 impl From<ureq::Error> for CopilotError {
     fn from(e: ureq::Error) -> Self {
         let msg = match &e {
+            ureq::Error::StatusCode(400) => {
+                "Request failed (HTTP 400). Check if the model is enabled at https://github.com/settings/copilot/features".to_string()
+            }
             ureq::Error::StatusCode(401) => "Authentication failed. Try 'ghcc login'".to_string(),
             ureq::Error::StatusCode(403) => {
                 "Access denied. Is your Copilot subscription active?".to_string()
@@ -148,11 +171,16 @@ pub fn list_models(auth: &CopilotAuth) -> Result<Vec<Model>, CopilotError> {
         .body_mut()
         .read_json()?;
 
-    // Filter only enabled models
+    // Filter only enabled models (must have model_picker_enabled AND policy.state == "enabled")
     let enabled_models = response
         .data
         .into_iter()
-        .filter(|m| m.model_picker_enabled)
+        .filter(|m| {
+            m.model_picker_enabled
+                && m.policy
+                    .as_ref()
+                    .map_or(false, |p| p.state.as_deref() == Some("enabled"))
+        })
         .collect();
 
     Ok(enabled_models)
@@ -214,15 +242,26 @@ fn lowercase_scope(message: &str) -> String {
 }
 
 /// Base prompt template shared across all commit styles
-const BASE_PROMPT: &str = "Generate a conventional commit message for this diff.
+const BASE_PROMPT: &str =
+    "You are a senior developer writing a commit message. Be precise and concise.
 
-Rules:
-- Format: type(scope): description
-- Scope: noun for affected area. Omit if broad.
-- Breaking changes: append ! to type.
-- Keep subject under 72 characters.
-- Describe intent, not implementation.
-- Output ONLY the commit message.";
+Conventional commit format: type(scope): subject
+
+Pick the right type:
+- feat = new capability for users
+- fix = bug was broken, now fixed
+- refactor = code change, same behavior
+- perf = optimization
+- style = formatting
+- ci = CI/CD pipelines
+- chore = everything else (deps, config)
+- docs/test/build = obvious
+
+Scope = main component affected (omit if unclear)
+Subject = what you did, imperative, max 50 chars
+Breaking change = add ! before colon
+
+Just the commit message, nothing else.";
 
 /// Build the prompt for generating a commit message
 pub(crate) fn build_prompt(
@@ -240,17 +279,15 @@ pub(crate) fn build_prompt(
     let style_instruction = match style {
         CommitStyle::SingleLine => "Output ONLY a single-line subject.",
         CommitStyle::Detailed => {
-            "Output format:
-- Subject line (under 72 chars)
+            "Include a short body:
+- Subject line (under 72 chars). Don't make it more generic just because a body follows.
 - Blank line
-- Bullet list of key changes, grouped by feature (- prefix)"
+- Brief bullet list covering key changes across the diff (- prefix). Prefer describing effect/behavior over internal configuration mechanics."
         }
         CommitStyle::Auto => {
-            "Include a body (blank line + bullet list) ONLY if:
-- The change is too complex to capture in the subject alone
-- Breaking changes need explanation
-
-Otherwise output ONLY the subject line."
+            "Include a body (blank line + bullet list) ONLY if the change is too complex for the subject alone or needs explanation.
+Otherwise output ONLY the subject line.
+If a body is included, keep the subject concrete and specific"
         }
     };
 
@@ -268,6 +305,30 @@ Diff:
 }
 
 pub fn generate_commit_message(
+    auth: &CopilotAuth,
+    diff: &str,
+    diff_stat: &str,
+    style: CommitStyle,
+) -> Result<String, CopilotError> {
+    // Determine which endpoint to use based on model's supported_endpoints
+    let use_responses = auth
+        .supported_endpoints
+        .as_ref()
+        .map(|endpoints| {
+            // Use /responses if it's the only supported endpoint (chat/completions not available)
+            !endpoints.iter().any(|e| e == "/chat/completions")
+                && endpoints.iter().any(|e| e == "/responses")
+        })
+        .unwrap_or(false);
+
+    if use_responses {
+        generate_via_responses(auth, diff, diff_stat, style)
+    } else {
+        generate_via_chat_completions(auth, diff, diff_stat, style)
+    }
+}
+
+fn generate_via_chat_completions(
     auth: &CopilotAuth,
     diff: &str,
     diff_stat: &str,
@@ -393,6 +454,117 @@ pub fn generate_commit_message(
     Ok(message)
 }
 
+fn generate_via_responses(
+    auth: &CopilotAuth,
+    diff: &str,
+    diff_stat: &str,
+    style: CommitStyle,
+) -> Result<String, CopilotError> {
+    let endpoint = auth
+        .api_endpoint
+        .as_deref()
+        .ok_or_else(|| CopilotError::Api("No API endpoint found in auth".into()))?;
+
+    let url = format!("{}/responses", endpoint);
+    let agent = auth::create_agent();
+
+    let model = auth.model.as_deref().unwrap_or(DEFAULT_MODEL);
+
+    // Get max diff size based on model's context limit
+    let max_diff_bytes = get_max_diff_bytes(auth.max_prompt_tokens);
+    if max_diff_bytes == 0 {
+        return Err(CopilotError::Api(
+            "Model context limit too small for commit generation".into(),
+        ));
+    }
+
+    // Truncate diff if too large (at a valid UTF-8 boundary)
+    let is_truncated = diff.len() > max_diff_bytes;
+    let diff = if is_truncated {
+        eprintln!(
+            "Warning: Diff is large ({} bytes), truncating to ~{} bytes",
+            diff.len(),
+            max_diff_bytes
+        );
+        let mut end = max_diff_bytes;
+        while end > 0 && !diff.is_char_boundary(end) {
+            end -= 1;
+        }
+        &diff[..end]
+    } else {
+        diff
+    };
+
+    let prompt = build_prompt(diff, diff_stat, style, is_truncated);
+
+    let request = ResponsesRequest {
+        model: model.to_string(),
+        input: prompt,
+        stream: true,
+        instructions: Some(
+            "You are an expert software engineer. Output only the raw commit message. No explanations, markdown, or extra text.".to_string()
+        ),
+    };
+
+    let session_id = Uuid::new_v4().to_string();
+    let machine_id = auth
+        .machine_id
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    let response = agent
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", auth.access))
+        .header("Copilot-Integration-Id", "vscode-chat")
+        .header("Editor-Version", "vscode/1.95.0")
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream")
+        .header("x-request-id", &session_id)
+        .header("vscode-sessionid", &session_id)
+        .header("vscode-machineid", &machine_id)
+        .send_json(&request)?;
+
+    let mut reader = BufReader::new(response.into_body().into_reader());
+    let mut line = String::new();
+    let mut full_message = String::new();
+    let mut chunks_received = 0;
+
+    // Parse streaming response from /responses endpoint
+    // Events look like: "event: response.output_text.delta\ndata: {\"delta\":\"text\",...}"
+    while reader.read_line(&mut line)? > 0 {
+        if let Some(data) = line.strip_prefix("data: ") {
+            let data = data.trim();
+
+            // Parse JSON and extract delta text from response.output_text.delta events
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                // Check if this is a text delta event
+                if let Some(delta) = json.get("delta").and_then(|d| d.as_str()) {
+                    chunks_received += 1;
+                    full_message.push_str(delta);
+                }
+            }
+        }
+        line.clear();
+    }
+
+    if chunks_received == 0 {
+        return Err(CopilotError::Api(
+            "No valid response chunks from Copilot".into(),
+        ));
+    }
+
+    let message = full_message.trim();
+
+    // Strip markdown code blocks if present (AI sometimes wraps output in ```)
+    let message = strip_markdown_code_block(message);
+    let message = lowercase_scope(&message);
+
+    if message.is_empty() {
+        return Err(CopilotError::Api("Empty response from Copilot".into()));
+    }
+    Ok(message)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,8 +598,7 @@ mod tests {
         let prompt = build_prompt(diff, diff_stat, CommitStyle::SingleLine, false);
 
         assert!(prompt.contains("single-line"));
-        assert!(prompt.contains("72 characters"));
-        assert!(prompt.contains("type(scope): description"));
+        assert!(prompt.contains("type(scope):"));
         assert!(prompt.contains(diff));
         assert!(prompt.contains(diff_stat));
     }
@@ -438,7 +609,7 @@ mod tests {
         let diff_stat = "file.rs | 10 ++++++++++";
         let prompt = build_prompt(diff, diff_stat, CommitStyle::Detailed, false);
 
-        assert!(prompt.contains("Bullet list"));
+        assert!(prompt.contains("bullet list"));
         assert!(prompt.contains("Blank line"));
         assert!(prompt.contains("- prefix"));
         assert!(prompt.contains(diff));
@@ -451,8 +622,8 @@ mod tests {
         let diff_stat = "file.rs | 10 ++++++++++";
         let prompt = build_prompt(diff, diff_stat, CommitStyle::Auto, false);
 
-        assert!(prompt.contains("too complex to capture"));
-        assert!(prompt.contains("Breaking changes"));
+        assert!(prompt.contains("too complex for the subject alone"));
+        assert!(prompt.contains("Breaking change"));
         assert!(prompt.contains("ONLY the subject line"));
         assert!(prompt.contains(diff));
         assert!(prompt.contains(diff_stat));
@@ -469,10 +640,9 @@ mod tests {
             CommitStyle::Auto,
         ] {
             let prompt = build_prompt(diff, diff_stat, style, false);
-            assert!(prompt.contains("type(scope): description"));
-            assert!(prompt.contains("72 characters"));
-            assert!(prompt.contains("intent"));
-            assert!(prompt.contains("Output ONLY"));
+            assert!(prompt.contains("type(scope):"));
+            assert!(prompt.contains("Breaking change"));
+            assert!(prompt.contains("commit message"));
         }
     }
 

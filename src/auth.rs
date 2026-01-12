@@ -32,6 +32,8 @@ pub struct CopilotAuth {
     pub machine_id: Option<String>,
     #[serde(default)]
     pub max_prompt_tokens: Option<u64>,
+    #[serde(default)]
+    pub supported_endpoints: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,7 +75,7 @@ pub enum AuthError {
 impl std::fmt::Display for AuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AuthError::NotFound => write!(f, "Credentials not found"),
+            AuthError::NotFound => write!(f, "Credentials not found. Try running 'ghcc login'"),
             AuthError::Network(msg) => write!(f, "Network error: {}", msg),
             AuthError::Parse(msg) => write!(f, "Parse error: {}", msg),
             AuthError::FileSystem(msg) => write!(f, "File system error: {}", msg),
@@ -272,7 +274,8 @@ pub fn login() -> Result<CopilotAuth, AuthError> {
         api_endpoint: copilot_resp.endpoints.get("api").cloned(),
         model: None,
         machine_id: Some(Uuid::new_v4().to_string()),
-        max_prompt_tokens: None, // Set when user selects a model
+        max_prompt_tokens: None,   // Set when user selects a model
+        supported_endpoints: None, // Set when user selects a model
     };
 
     Ok(auth)
@@ -284,6 +287,7 @@ pub fn refresh_token(
     current_model: Option<String>,
     current_machine_id: Option<String>,
     current_max_prompt_tokens: Option<u64>,
+    current_supported_endpoints: Option<Vec<String>>,
 ) -> Result<CopilotAuth, AuthError> {
     let agent = create_agent();
 
@@ -308,6 +312,7 @@ pub fn refresh_token(
         model: current_model,
         machine_id: current_machine_id,
         max_prompt_tokens: current_max_prompt_tokens,
+        supported_endpoints: current_supported_endpoints,
     })
 }
 
@@ -316,11 +321,18 @@ pub fn get_valid_auth() -> Result<CopilotAuth, AuthError> {
     let mut auth = read_auth()?;
 
     if is_expired(&auth) || auth.api_endpoint.is_none() {
-        // preserve current model, machine_id, and max_prompt_tokens during refresh
+        // preserve current model, machine_id, max_prompt_tokens, and supported_endpoints during refresh
         let model = auth.model.clone();
         let machine_id = auth.machine_id.clone();
         let max_prompt_tokens = auth.max_prompt_tokens;
-        auth = refresh_token(&auth.refresh, model, machine_id, max_prompt_tokens)?;
+        let supported_endpoints = auth.supported_endpoints.clone();
+        auth = refresh_token(
+            &auth.refresh,
+            model,
+            machine_id,
+            max_prompt_tokens,
+            supported_endpoints,
+        )?;
         save_auth(&auth)?;
     }
 
@@ -367,6 +379,7 @@ mod tests {
             model: None,
             machine_id: None,
             max_prompt_tokens: None,
+            supported_endpoints: None,
         }
     }
 
