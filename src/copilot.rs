@@ -35,6 +35,8 @@ struct ChatRequest {
     n: i32,
     stream: bool,
     intent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -372,6 +374,14 @@ fn generate_via_chat_completions(
 
     let prompt = build_prompt(diff, diff_stat, style, is_truncated);
 
+    // Default to "none" for GPT-5.x reasoning models (faster, still good quality)
+    // Don't send for non-GPT-5 models - they reject the parameter with HTTP 400
+    let reasoning_effort = if model.starts_with("gpt-5") && !model.contains("codex") {
+        Some("none".to_string())
+    } else {
+        None
+    };
+
     let request = ChatRequest {
         messages: vec![
             ChatMessage {
@@ -390,6 +400,7 @@ fn generate_via_chat_completions(
         n: 1,
         stream: true,
         intent: true,
+        reasoning_effort,
     };
 
     let session_id = Uuid::new_v4().to_string();
