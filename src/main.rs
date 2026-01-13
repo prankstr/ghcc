@@ -436,13 +436,13 @@ fn main() -> ExitCode {
         }
         // Check if this arg is the value for --diff-file
         if let Some(pos) = args.iter().position(|x| x == "--diff-file") {
-            if args.get(pos + 1).map_or(false, |arg| arg == *a) {
+            if args.get(pos + 1) == Some(*a) {
                 return false;
             }
         }
         // Check if this arg is the value for --model
         if let Some(pos) = args.iter().position(|x| x == "--model") {
-            if args.get(pos + 1).map_or(false, |arg| arg == *a) {
+            if args.get(pos + 1) == Some(*a) {
                 return false;
             }
         }

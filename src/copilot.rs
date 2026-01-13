@@ -179,7 +179,7 @@ pub fn list_models(auth: &CopilotAuth) -> Result<Vec<Model>, CopilotError> {
             m.model_picker_enabled
                 && m.policy
                     .as_ref()
-                    .map_or(false, |p| p.state.as_deref() == Some("enabled"))
+                    .is_some_and(|p| p.state.as_deref() == Some("enabled"))
         })
         .collect();
 
