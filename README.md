@@ -1,18 +1,18 @@
 # ghcc
 
-ghcc is a CLI tool for generating conventional commit messages with GitHub Copilot.
+Fast CLI tool for generating conventional commit messages with GitHub Copilot.
 
 ## Features
 
 - **Conventional commits** - Generates conventional commit style messages ([spec](https://www.conventionalcommits.org/))
 - **Fast** - Single command, no prompts required
-- **Commit styles** - Single-line, detailed with body, or let the AI decide
+- **Commit styles** - Single-line, detailed body to provide context, or let the AI decide
 - **Git hook integration** - Pre-fills your editor so you can check and edit before committing
 - **Uses GitHub Copilot** - Just log in with your existing account. No API keys needed.
 - **Model selection** - Choose from your enabled Copilot models (default: `gpt-4.1`)
 
 > [!TIP]
-> `gpt-4.1` (default) performs best of the free models. For a bump in quality, any of the non-Codex GPT-5 models (`gpt-5`, `gpt-5.1`, `gpt-5.2`) perform well but consume premium requests.
+> `gpt-4.1` (default) seems to perform best of the free models. For a bump in quality, any of the non-Codex GPT-5 models (`gpt-5`, `gpt-5.1`, `gpt-5.2`) perform well but will consume premium requests.
 
 ## Quickstart
 
@@ -59,7 +59,7 @@ ghcc is a CLI tool for generating conventional commit messages with GitHub Copil
 
 ```sh
 ghcc              # Single-line commit message (default)
-ghcc -d           # Detailed: subject + paragraph body
+ghcc -d           # Detailed: subject + paragraph body to provide context
 ghcc -a           # Auto: AI decides format based on complexity
 ghcc status       # Check authentication status
 ghcc models       # List and select models (default: gpt-4.1)
