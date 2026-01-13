@@ -22,7 +22,7 @@ fn print_usage() {
     eprintln!("  ghcc hook uninstall Remove git prepare-commit-msg hook");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  -d, --detailed      Include bullet-point body (default: single-line)");
+    eprintln!("  -d, --detailed      Include detailed body (default: single-line)");
     eprintln!("  -a, --auto          Let AI decide format (experimental)");
     #[cfg(debug_assertions)]
     {
