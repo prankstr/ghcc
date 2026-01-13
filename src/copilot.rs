@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
 use uuid::Uuid;
 
-pub const DEFAULT_MODEL: &str = "gpt-5-mini";
+pub const DEFAULT_MODEL: &str = "gpt-4.1";
 pub const DEFAULT_MAX_PROMPT_TOKENS: u64 = 128_000;
 
 // Rough estimate: 1 token ≈ 4 bytes for code
@@ -282,12 +282,12 @@ pub(crate) fn build_prompt(
             "Include a short body:
 - Subject line (under 72 chars). Don't make it more generic just because a body follows.
 - Blank line
-- Brief bullet list covering key changes across the diff (- prefix). Prefer describing effect/behavior over internal configuration mechanics."
+- Brief paragraph explaining what changed and why, if not obvious from the subject."
         }
         CommitStyle::Auto => {
-            "Include a body (blank line + bullet list) ONLY if the change is too complex for the subject alone or needs explanation.
+            "Include a body (blank line + brief paragraph) ONLY if the change is too complex for the subject alone or needs explanation.
 Otherwise output ONLY the subject line.
-If a body is included, keep the subject concrete and specific"
+If a body is included, keep the subject concrete and specific."
         }
     };
 
@@ -609,9 +609,9 @@ mod tests {
         let diff_stat = "file.rs | 10 ++++++++++";
         let prompt = build_prompt(diff, diff_stat, CommitStyle::Detailed, false);
 
-        assert!(prompt.contains("bullet list"));
+        assert!(prompt.contains("Brief paragraph"));
         assert!(prompt.contains("Blank line"));
-        assert!(prompt.contains("- prefix"));
+        assert!(prompt.contains("what changed and why"));
         assert!(prompt.contains(diff));
         assert!(prompt.contains(diff_stat));
     }
