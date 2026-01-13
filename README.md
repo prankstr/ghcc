@@ -51,7 +51,7 @@ Fast CLI tool for generating conventional commit messages with GitHub Copilot.
 3. **Generate commit messages:**
 
    ```sh
-   git add -p
+   git add .
    ghcc
    ```
 
